@@ -4,190 +4,91 @@ import pkg from '@whiskeysockets/baileys';
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = pkg;
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
-import { default as ytdl } from '@distube/ytdl-core';
+import youtubedl from 'youtube-dl-exec';
 import { createWriteStream } from 'fs';
-import ffmpeg from 'ffmpeg-static';
-import { spawn } from 'child_process';
+import express from 'express';
+
+// Create Express app for health check
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.send('WhatsApp Bot is running!');
+});
+
+// Start server
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
 
 const downloadsDir = './downloads';
 const pendingDownloads = new Map();
 
-// Add these headers and cookies configuration
-const COOKIE = 'CONSENT=YES+; Path=/; Domain=.youtube.com';
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-async function downloadYouTubeVideo(url, outputPath) {
-    return new Promise((resolve, reject) => {
-        try {
-            const video = ytdl(url, {
-                quality: '18', // 360p
-                filter: 'audioandvideo',
-                requestOptions: {
-                    headers: {
-                        'Cookie': COOKIE,
-                        'User-Agent': USER_AGENT,
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Connection': 'keep-alive',
-                        'Upgrade-Insecure-Requests': '1'
-                    }
-                }
-            });
-
-            const writeStream = createWriteStream(outputPath);
-            let starttime = Date.now();
-            let downloaded = 0;
-            let totalSize = 0;
-
-            video.on('info', (info, format) => {
-                console.log(`Video title: ${info.videoDetails.title}`);
-                console.log(`Duration: ${info.videoDetails.lengthSeconds} seconds`);
-                totalSize = format.contentLength;
-                console.log(`Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
-            });
-
-            video.on('data', (chunk) => {
-                downloaded += chunk.length;
-                if (totalSize) {
-                    const percent = (downloaded / totalSize) * 100;
-                    const downloadedMB = (downloaded / 1024 / 1024).toFixed(2);
-                    const totalMB = (totalSize / 1024 / 1024).toFixed(2);
-                    console.log(`Downloaded: ${percent.toFixed(2)}% (${downloadedMB}MB of ${totalMB}MB)`);
-                }
-            });
-
-            video.pipe(writeStream);
-
-            writeStream.on('finish', () => {
-                console.log('Successfully downloaded video');
-                resolve();
-            });
-
-            writeStream.on('error', (err) => {
-                console.error('Error writing to file:', err);
-                reject(err);
-            });
-
-            video.on('error', (err) => {
-                console.error('Error downloading video:', err);
-                reject(err);
-            });
-        } catch (error) {
-            console.error('Error in downloadYouTubeVideo:', error);
-            reject(error);
-        }
-    });
-}
-
 async function getVideoQualities(url) {
     try {
-        const info = await ytdl.getInfo(url, {
-            requestOptions: {
-                headers: {
-                    'Cookie': COOKIE,
-                    'User-Agent': USER_AGENT,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
-                }
-            }
+        // Get video info using youtube-dl
+        const info = await youtubedl(url, {
+            dumpSingleJson: true,
+            noWarnings: true,
+            noCallHome: true,
+            preferFreeFormats: true,
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ]
         });
 
-        const formats = info.formats.filter(format => {
-            return format.hasVideo && format.hasAudio && format.qualityLabel;
-        });
-        
-        formats.sort((a, b) => (b.height || 0) - (a.height || 0));
-        
-        const sd = formats.find(f => f.height <= 360) || formats[formats.length - 1];
-        const hd = formats.find(f => f.height <= 720) || formats[0];
-        
-        if (!formats.length) {
-            throw new Error('No suitable formats found for this video');
+        if (!info || !info.formats) {
+            throw new Error('Could not get video information');
         }
 
+        // Filter formats with both video and audio
+        const formats = info.formats.filter(format => 
+            format.vcodec !== 'none' && 
+            format.acodec !== 'none' &&
+            format.height
+        );
+
+        // Sort by height (quality)
+        formats.sort((a, b) => (b.height || 0) - (a.height || 0));
+
+        // Get SD and HD formats
+        const sd = formats.find(f => f.height <= 360) || formats[formats.length - 1];
+        const hd = formats.find(f => f.height <= 720) || formats[0];
+
         return {
-            title: info.videoDetails.title,
+            title: info.title,
             formats: [sd, hd].filter(f => f),
-            videoDetails: info.videoDetails
+            duration: info.duration
         };
     } catch (error) {
-        console.error('Error getting video qualities:', error);
-        if (error.message.includes('Sign in')) {
+        console.error('Error getting video info:', error);
+        if (error.message.includes('Private video')) {
+            throw new Error('This video is private');
+        } else if (error.message.includes('Sign in')) {
             throw new Error('This video requires age verification. Please try another video.');
-        } else if (error.message.includes('Video unavailable')) {
-            throw new Error('This video is unavailable or private');
-        } else if (error.message.includes('copyright')) {
-            throw new Error('This video is not available due to copyright restrictions');
         } else {
-            throw new Error(`Could not get video info: ${error.message}`);
+            throw new Error('Could not get video info. Please try another video.');
         }
     }
 }
 
-async function downloadYouTubeVideoWithQuality(url, outputPath, quality) {
-    return new Promise((resolve, reject) => {
-        try {
-            const video = ytdl(url, {
-                quality: quality,
-                filter: 'audioandvideo',
-                requestOptions: {
-                    headers: {
-                        'Cookie': COOKIE,
-                        'User-Agent': USER_AGENT,
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Connection': 'keep-alive',
-                        'Upgrade-Insecure-Requests': '1'
-                    }
-                }
-            });
-
-            const writeStream = createWriteStream(outputPath);
-            let starttime = Date.now();
-            let downloaded = 0;
-            let totalSize = 0;
-
-            video.on('info', (info, format) => {
-                console.log(`Video title: ${info.videoDetails.title}`);
-                console.log(`Quality: ${format.qualityLabel}`);
-                console.log(`Duration: ${info.videoDetails.lengthSeconds} seconds`);
-                totalSize = format.contentLength;
-                console.log(`Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
-            });
-
-            video.on('data', (chunk) => {
-                downloaded += chunk.length;
-                if (totalSize) {
-                    const percent = (downloaded / totalSize) * 100;
-                    const downloadedMB = (downloaded / 1024 / 1024).toFixed(2);
-                    const totalMB = (totalSize / 1024 / 1024).toFixed(2);
-                    console.log(`Downloaded: ${percent.toFixed(2)}% (${downloadedMB}MB of ${totalMB}MB)`);
-                }
-            });
-
-            video.pipe(writeStream);
-
-            writeStream.on('finish', () => {
-                console.log('Successfully downloaded video');
-                resolve();
-            });
-
-            writeStream.on('error', (err) => {
-                console.error('Error writing to file:', err);
-                reject(err);
-            });
-
-            video.on('error', (err) => {
-                console.error('Error downloading video:', err);
-                reject(err);
-            });
-        } catch (error) {
-            console.error('Error in downloadYouTubeVideo:', error);
-            reject(error);
-        }
-    });
+async function downloadYouTubeVideo(url, outputPath, format) {
+    try {
+        await youtubedl(url, {
+            output: outputPath,
+            format: format,
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ]
+        });
+        return true;
+    } catch (error) {
+        console.error('Error downloading video:', error);
+        throw error;
+    }
 }
 
 async function connectToWhatsApp() {
@@ -221,37 +122,20 @@ async function connectToWhatsApp() {
         });
 
         sock.ev.on('messages.upsert', async function({ messages, type }) {
-            console.log('Received message update of type:', type);
-            console.log('Raw message:', JSON.stringify(messages[0], null, 2));
-
             const m = messages[0];
-            if (!m.message) {
-                console.log('No message content found');
-                return;
-            }
+            if (!m.message) return;
 
-            // Log all available message types
-            console.log('Available message types:', Object.keys(m.message));
-
-            // Try to get the message content from different possible locations
             let messageText = '';
             if (m.message.conversation) {
                 messageText = m.message.conversation;
             } else if (m.message.extendedTextMessage) {
                 messageText = m.message.extendedTextMessage.text;
             } else {
-                console.log('Message type not supported');
                 return;
             }
 
             const sender = m.key.remoteJid;
-            if (!sender) {
-                console.log('No sender found');
-                return;
-            }
-
-            console.log('Processing message:', messageText);
-            console.log('From sender:', sender);
+            if (!sender) return;
 
             // Help command
             if (messageText.toLowerCase() === '.help') {
@@ -270,15 +154,12 @@ async function connectToWhatsApp() {
 
             if (youtubeMatch) {
                 try {
-                    // Send acknowledgment
                     await sock.sendMessage(sender, { text: '📥 Checking video availability...' });
 
                     const videoUrl = `https://www.youtube.com/watch?v=${youtubeMatch[1]}`;
-                    const { title, formats, videoDetails } = await getVideoQualities(videoUrl);
+                    const { title, formats, duration } = await getVideoQualities(videoUrl);
 
-                    // Validate video length (optional, adjust the limit as needed)
-                    const duration = parseInt(videoDetails.lengthSeconds);
-                    if (duration > 600) { // 10 minutes limit
+                    if (duration > 600) {
                         await sock.sendMessage(sender, { 
                             text: '❌ Video is too long. Please choose a video under 10 minutes.' 
                         });
@@ -289,94 +170,84 @@ async function connectToWhatsApp() {
                         throw new Error('No suitable video formats found');
                     }
 
-                    // Create quality selection message
                     let message = `🎥 *${title}*\n\nChoose video quality:\n\n`;
-                    
                     formats.forEach((format, index) => {
-                        const size = format.contentLength ? 
-                            `(${(format.contentLength / (1024 * 1024)).toFixed(2)}MB)` : 
+                        const size = format.filesize ? 
+                            `(${(format.filesize / (1024 * 1024)).toFixed(2)}MB)` : 
                             '(size unknown)';
-                        message += `*${index + 1}* - ${format.qualityLabel} ${size}\n`;
+                        message += `*${index + 1}* - ${format.height}p ${size}\n`;
                     });
                     
                     message += '\nReply with the number of your choice.';
 
-                    // Store video info for later use
-                    const videoInfo = {
+                    pendingDownloads.set(sender, {
                         url: videoUrl,
                         title: title,
                         formats: formats
-                    };
-                    pendingDownloads.set(sender, videoInfo);
+                    });
                     
                     await sock.sendMessage(sender, { text: message });
 
                 } catch (error) {
                     console.error('Error processing video:', error);
                     await sock.sendMessage(sender, { 
-                        text: `❌ ${error.message || 'Sorry, I couldn\'t process this video. Please try another one.'}` 
+                        text: `❌ ${error.message}` 
                     });
                 }
                 return;
             }
 
             if (pendingDownloads.has(sender) && (messageText === '1' || messageText === '2')) {
-                // Handle quality selection
-                const quality = messageText === '1' ? 'sd' : 'hd';
                 const videoInfo = pendingDownloads.get(sender);
+                if (!videoInfo) return;
 
-                if (videoInfo) {
-                    try {
-                        const selectedFormat = videoInfo.formats[parseInt(messageText) - 1];
-                        if (!selectedFormat) {
-                            throw new Error(`${quality.toUpperCase()} quality not available for this video`);
-                        }
-
-                        const timestamp = Date.now();
-                        const outputPath = join(downloadsDir, `video_${timestamp}.mp4`);
-
-                        // Ensure downloads directory exists
-                        await fs.mkdir(downloadsDir, { recursive: true });
-
-                        // Send download start message
-                        await sock.sendMessage(sender, { 
-                            text: `📥 Downloading video in ${selectedFormat.qualityLabel}...` 
-                        });
-
-                        // Download the video
-                        await downloadYouTubeVideoWithQuality(videoInfo.url, outputPath, selectedFormat.itag);
-
-                        // Read the downloaded file
-                        console.log('Reading video file...');
-                        const videoBuffer = await fs.readFile(outputPath);
-                        const stats = await fs.stat(outputPath);
-                        console.log('File size:', stats.size / (1024 * 1024), 'MB');
-
-                        // Send the video
-                        console.log('Sending video...');
-                        await sock.sendMessage(sender, { 
-                            video: videoBuffer,
-                            caption: `✅ ${videoInfo.title}\nQuality: ${selectedFormat.qualityLabel}`
-                        });
-
-                        // Clean up
-                        pendingDownloads.delete(sender);
-                        await fs.unlink(outputPath);
-
-                    } catch (error) {
-                        console.error('Error downloading video:', error);
-                        await sock.sendMessage(sender, { 
-                            text: '❌ Sorry, I couldn\'t download the video. Please try another quality or video.' 
-                        });
+                try {
+                    const selectedFormat = videoInfo.formats[parseInt(messageText) - 1];
+                    if (!selectedFormat) {
+                        throw new Error('Invalid quality selection');
                     }
+
+                    const timestamp = Date.now();
+                    const outputPath = join(downloadsDir, `video_${timestamp}.mp4`);
+
+                    await fs.mkdir(downloadsDir, { recursive: true });
+
+                    await sock.sendMessage(sender, { 
+                        text: `📥 Downloading video in ${selectedFormat.height}p...` 
+                    });
+
+                    await downloadYouTubeVideo(videoInfo.url, outputPath, selectedFormat.format_id);
+
+                    console.log('Reading video file...');
+                    const videoBuffer = await fs.readFile(outputPath);
+                    console.log('Sending video...');
+
+                    await sock.sendMessage(sender, { 
+                        video: videoBuffer,
+                        caption: `${videoInfo.title}\n${selectedFormat.height}p`
+                    });
+
+                    // Clean up
+                    await fs.unlink(outputPath);
+                    pendingDownloads.delete(sender);
+
+                } catch (error) {
+                    console.error('Error downloading video:', error);
+                    await sock.sendMessage(sender, { 
+                        text: '❌ Failed to download video. Please try again or choose another video.' 
+                    });
+                    pendingDownloads.delete(sender);
                 }
             }
         });
 
-    } catch (err) {
-        console.error('Error in connectToWhatsApp:', err);
+    } catch (error) {
+        console.error('Error in WhatsApp connection:', error);
     }
 }
+
+// Create downloads directory
+await fs.mkdir(downloadsDir, { recursive: true }).catch(console.error);
 
 // Start the bot
 console.log('Starting WhatsApp bot...');
