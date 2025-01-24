@@ -27,7 +27,7 @@ const pendingDownloads = new Map();
 
 async function getVideoQualities(url) {
     try {
-        // Get video info using youtube-dl
+        // Get video info using youtube-dl with additional options
         const info = await youtubedl(url, {
             dumpSingleJson: true,
             noWarnings: true,
@@ -36,7 +36,16 @@ async function getVideoQualities(url) {
             addHeader: [
                 'referer:youtube.com',
                 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            ]
+            ],
+            cookies: 'cookies.txt', // Will store cookies if needed
+            extractAudio: false,
+            noCheckCertificates: true,
+            noPlaylist: true,
+            youtubeSkipDashManifest: true,
+            geoBypass: true,
+            // Add options to bypass age restriction
+            ageLimitBypass: true,
+            cookies: 'cookies.txt'
         });
 
         if (!info || !info.formats) {
@@ -47,7 +56,9 @@ async function getVideoQualities(url) {
         const formats = info.formats.filter(format => 
             format.vcodec !== 'none' && 
             format.acodec !== 'none' &&
-            format.height
+            format.height &&
+            // Ensure format is downloadable
+            !format.format_note?.includes('DRM')
         );
 
         // Sort by height (quality)
@@ -56,6 +67,10 @@ async function getVideoQualities(url) {
         // Get SD and HD formats
         const sd = formats.find(f => f.height <= 360) || formats[formats.length - 1];
         const hd = formats.find(f => f.height <= 720) || formats[0];
+
+        if (!formats.length) {
+            throw new Error('No suitable formats found for this video');
+        }
 
         return {
             title: info.title,
@@ -66,8 +81,8 @@ async function getVideoQualities(url) {
         console.error('Error getting video info:', error);
         if (error.message.includes('Private video')) {
             throw new Error('This video is private');
-        } else if (error.message.includes('Sign in')) {
-            throw new Error('This video requires age verification. Please try another video.');
+        } else if (error.message.includes('Sign in') || error.message.includes('age')) {
+            throw new Error('Sorry, this video is not available due to age restrictions.');
         } else {
             throw new Error('Could not get video info. Please try another video.');
         }
@@ -82,7 +97,14 @@ async function downloadYouTubeVideo(url, outputPath, format) {
             addHeader: [
                 'referer:youtube.com',
                 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            ]
+            ],
+            cookies: 'cookies.txt',
+            extractAudio: false,
+            noCheckCertificates: true,
+            noPlaylist: true,
+            youtubeSkipDashManifest: true,
+            geoBypass: true,
+            ageLimitBypass: true
         });
         return true;
     } catch (error) {
