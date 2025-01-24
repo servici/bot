@@ -12,12 +12,26 @@ import { spawn } from 'child_process';
 const downloadsDir = './downloads';
 const pendingDownloads = new Map();
 
+// Add these headers and cookies configuration
+const COOKIE = 'CONSENT=YES+; Path=/; Domain=.youtube.com';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 async function downloadYouTubeVideo(url, outputPath) {
     return new Promise((resolve, reject) => {
         try {
             const video = ytdl(url, {
                 quality: '18', // 360p
                 filter: 'audioandvideo',
+                requestOptions: {
+                    headers: {
+                        'Cookie': COOKIE,
+                        'User-Agent': USER_AGENT,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                }
             });
 
             const writeStream = createWriteStream(outputPath);
@@ -67,33 +81,42 @@ async function downloadYouTubeVideo(url, outputPath) {
 
 async function getVideoQualities(url) {
     try {
-        const info = await ytdl.getInfo(url);
+        const info = await ytdl.getInfo(url, {
+            requestOptions: {
+                headers: {
+                    'Cookie': COOKIE,
+                    'User-Agent': USER_AGENT,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+            }
+        });
+
         const formats = info.formats.filter(format => {
-            // Only include formats that have both video and audio
             return format.hasVideo && format.hasAudio && format.qualityLabel;
         });
         
-        // Sort formats by quality (height)
         formats.sort((a, b) => (b.height || 0) - (a.height || 0));
         
-        // Find best quality for SD (360p) and HD (720p)
         const sd = formats.find(f => f.height <= 360) || formats[formats.length - 1];
         const hd = formats.find(f => f.height <= 720) || formats[0];
         
-        // Ensure we have at least one format
         if (!formats.length) {
             throw new Error('No suitable formats found for this video');
         }
 
         return {
             title: info.videoDetails.title,
-            formats: [sd, hd].filter(f => f), // Remove null entries
+            formats: [sd, hd].filter(f => f),
             videoDetails: info.videoDetails
         };
     } catch (error) {
         console.error('Error getting video qualities:', error);
-        // Add more specific error information
-        if (error.message.includes('Video unavailable')) {
+        if (error.message.includes('Sign in')) {
+            throw new Error('This video requires age verification. Please try another video.');
+        } else if (error.message.includes('Video unavailable')) {
             throw new Error('This video is unavailable or private');
         } else if (error.message.includes('copyright')) {
             throw new Error('This video is not available due to copyright restrictions');
@@ -109,6 +132,16 @@ async function downloadYouTubeVideoWithQuality(url, outputPath, quality) {
             const video = ytdl(url, {
                 quality: quality,
                 filter: 'audioandvideo',
+                requestOptions: {
+                    headers: {
+                        'Cookie': COOKIE,
+                        'User-Agent': USER_AGENT,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                }
             });
 
             const writeStream = createWriteStream(outputPath);
