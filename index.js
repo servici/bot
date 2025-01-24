@@ -68,23 +68,38 @@ async function downloadYouTubeVideo(url, outputPath) {
 async function getVideoQualities(url) {
     try {
         const info = await ytdl.getInfo(url);
-        const formats = info.formats.filter(format => format.hasVideo && format.hasAudio);
-        
-        // Group formats by quality label
-        const qualities = new Map();
-        formats.forEach(format => {
-            if (format.qualityLabel) {
-                qualities.set(format.qualityLabel, format);
-            }
+        const formats = info.formats.filter(format => {
+            // Only include formats that have both video and audio
+            return format.hasVideo && format.hasAudio && format.qualityLabel;
         });
+        
+        // Sort formats by quality (height)
+        formats.sort((a, b) => (b.height || 0) - (a.height || 0));
+        
+        // Find best quality for SD (360p) and HD (720p)
+        const sd = formats.find(f => f.height <= 360) || formats[formats.length - 1];
+        const hd = formats.find(f => f.height <= 720) || formats[0];
+        
+        // Ensure we have at least one format
+        if (!formats.length) {
+            throw new Error('No suitable formats found for this video');
+        }
 
         return {
             title: info.videoDetails.title,
-            formats: Array.from(qualities.values())
+            formats: [sd, hd].filter(f => f), // Remove null entries
+            videoDetails: info.videoDetails
         };
     } catch (error) {
         console.error('Error getting video qualities:', error);
-        throw error;
+        // Add more specific error information
+        if (error.message.includes('Video unavailable')) {
+            throw new Error('This video is unavailable or private');
+        } else if (error.message.includes('copyright')) {
+            throw new Error('This video is not available due to copyright restrictions');
+        } else {
+            throw new Error(`Could not get video info: ${error.message}`);
+        }
     }
 }
 
@@ -223,46 +238,50 @@ async function connectToWhatsApp() {
             if (youtubeMatch) {
                 try {
                     // Send acknowledgment
-                    await sock.sendMessage(sender, { text: '📥 Getting available video qualities...' });
+                    await sock.sendMessage(sender, { text: '📥 Checking video availability...' });
 
                     const videoUrl = `https://www.youtube.com/watch?v=${youtubeMatch[1]}`;
-                    const { title, formats } = await getVideoQualities(videoUrl);
+                    const { title, formats, videoDetails } = await getVideoQualities(videoUrl);
 
-                    // Find SD (360p) and HD (720p) formats
-                    const sdFormat = formats.find(f => f.qualityLabel === '360p');
-                    const hdFormat = formats.find(f => f.qualityLabel === '720p');
+                    // Validate video length (optional, adjust the limit as needed)
+                    const duration = parseInt(videoDetails.lengthSeconds);
+                    if (duration > 600) { // 10 minutes limit
+                        await sock.sendMessage(sender, { 
+                            text: '❌ Video is too long. Please choose a video under 10 minutes.' 
+                        });
+                        return;
+                    }
 
-                    if (!sdFormat && !hdFormat) {
+                    if (!formats || formats.length === 0) {
                         throw new Error('No suitable video formats found');
                     }
 
                     // Create quality selection message
                     let message = `🎥 *${title}*\n\nChoose video quality:\n\n`;
                     
-                    if (sdFormat) {
-                        message += `*1* - 📱 SD Quality (${(sdFormat.contentLength / (1024 * 1024)).toFixed(2)}MB)\n`;
-                    }
-                    if (hdFormat) {
-                        message += `*2* - 🎥 HD Quality (${(hdFormat.contentLength / (1024 * 1024)).toFixed(2)}MB)\n`;
-                    }
+                    formats.forEach((format, index) => {
+                        const size = format.contentLength ? 
+                            `(${(format.contentLength / (1024 * 1024)).toFixed(2)}MB)` : 
+                            '(size unknown)';
+                        message += `*${index + 1}* - ${format.qualityLabel} ${size}\n`;
+                    });
                     
-                    message += '\nReply with *1* for SD or *2* for HD quality.';
+                    message += '\nReply with the number of your choice.';
 
                     // Store video info for later use
                     const videoInfo = {
                         url: videoUrl,
                         title: title,
-                        sd: sdFormat,
-                        hd: hdFormat
+                        formats: formats
                     };
                     pendingDownloads.set(sender, videoInfo);
                     
                     await sock.sendMessage(sender, { text: message });
 
                 } catch (error) {
-                    console.error('Error getting video qualities:', error);
+                    console.error('Error processing video:', error);
                     await sock.sendMessage(sender, { 
-                        text: '❌ Sorry, I couldn\'t get the video qualities. Please try another video.' 
+                        text: `❌ ${error.message || 'Sorry, I couldn\'t process this video. Please try another one.'}` 
                     });
                 }
                 return;
@@ -275,7 +294,7 @@ async function connectToWhatsApp() {
 
                 if (videoInfo) {
                     try {
-                        const selectedFormat = quality === 'sd' ? videoInfo.sd : videoInfo.hd;
+                        const selectedFormat = videoInfo.formats[parseInt(messageText) - 1];
                         if (!selectedFormat) {
                             throw new Error(`${quality.toUpperCase()} quality not available for this video`);
                         }
